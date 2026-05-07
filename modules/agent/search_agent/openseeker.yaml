@@ -1,0 +1,79 @@
+system_prompt: |
+  You are a tool-augmented QA agent. Cleverly leverage appropriate tools to answer the user's question.
+
+  # Tools
+
+  You may call one or more functions to assist with the user query.
+  You are provided with function signatures within <tools></tools> XML tags:
+  <tools>
+  {"name": "search", "description": "Performs batched web searches: supply an array 'query'; the tool retrieves the top 10 results for each query in one call.", "parameters": {"type": "object", "properties": {"query": {"type": "array", "items": {"type": "string"}, "description": "Array of query strings. Include multiple complementary search queries in a single call."}}, "required": ["query"]}}
+  {"name": "visit", "description": "Parse webpage(s) and return the summary of the content according to the goal.", "parameters": {"type": "object", "properties": {"url": {"type": ["string", "array"], "items": {"type": "string"}, "minItems": 1, "description": "The URL(s) of the webpage(s) to visit. Can be a single URL or an array of URLs."}, "goal": {"type": "string", "description": "The goal of the visit for webpage(s)."}}, "required": ["url", "goal"]}}
+  </tools>
+
+   If you decide to call tools, you MUST strictly follow the format below.
+
+  All tool calls must be wrapped inside <tool_calls_begin> and </tool_calls_end>.
+  Inside this block, each individual tool call must be wrapped with <tool_call> and </tool_call>.
+
+  The exact required format is:
+
+  <tool_calls_begin>
+  <tool_call>
+  {"name": <function-name>, "arguments": <args-json-object>}
+  </tool_call>
+  <tool_call>
+  {"name": <function-name>, "arguments": <args-json-object>}
+  </tool_call>
+  </tool_calls_end>
+
+tools:
+  - type: function
+    function:
+      name: search
+      description: "Performs batched web searches: supply an array 'query'; the tool retrieves the top 10 results for each query in one call."
+      parameters:
+        type: object
+        properties:
+          query:
+            type: array
+            items:
+              type: string
+            description: "Array of query strings. Include multiple complementary search queries in a single call."
+        required: ["query"]
+  - type: function
+    function:
+      name: visit
+      description: "Parse webpage(s) and return the summary of the content according to the goal."
+      parameters:
+        type: object
+        properties:
+          url:
+            anyOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+            description: "The URL(s) of the webpage(s) to visit. Can be a single URL or an array of URLs."
+          goal:
+            type: string
+            description: "The goal of the visit for webpage(s)."
+        required: ["url", "goal"]
+  - type: function
+    function:
+      name: retrieve
+      description: "A tool for retrieving and extracting information from a specific website. Similar with visit/open tool but use LLM to extract the information by query."
+      parameters:
+        type: object
+        properties:
+          url:
+            description: "The target website URL or domain."
+            anyOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+          query:
+            type: string
+            description: "The specific information goal for retrieving from webpage(s)."
+        required: ["url", "query"]
+

@@ -1,0 +1,23 @@
+# Packaging exclusions from zip.sh
+zip.sh
+.env
+
+# Hidden local/tooling directories
+.[!.]*/
+..?*/
+
+# Scratch/playground directories prefixed with "_"
+_*/
+**/_*/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+
+# Generated outputs and local datasets
+output/
+data/dataset/
+data/eval/
+
+# Excluded training subtree
+rl_training/

@@ -1,0 +1,82 @@
+[
+  {
+    "gen_model": "deepseekv4flash",
+    "n_judges": 3,
+    "judge_models": [
+      "deepseekv4pro",
+      "glm5",
+      "qwen35plus"
+    ],
+    "n_graphs": 100,
+    "entity_mean": 0.8743302457142857,
+    "entity_std": 0.11150082295709571,
+    "entity_se": 0.01115008229570957,
+    "predicate_mean": 0.8714752987445887,
+    "predicate_std": 0.10046476421298067,
+    "predicate_se": 0.010046476421298068
+  },
+  {
+    "gen_model": "deepseekv4pro",
+    "n_judges": 3,
+    "judge_models": [
+      "deepseekv4pro",
+      "glm5",
+      "qwen35plus"
+    ],
+    "n_graphs": 100,
+    "entity_mean": 0.8626805293994928,
+    "entity_std": 0.09723278048788735,
+    "entity_se": 0.009723278048788735,
+    "predicate_mean": 0.8445918749376206,
+    "predicate_std": 0.09761728949542933,
+    "predicate_se": 0.009761728949542933
+  },
+  {
+    "gen_model": "qwen35plus",
+    "n_judges": 3,
+    "judge_models": [
+      "deepseekv4pro",
+      "glm5",
+      "qwen35plus"
+    ],
+    "n_graphs": 100,
+    "entity_mean": 0.8391826363636363,
+    "entity_std": 0.13975533700659978,
+    "entity_se": 0.013975533700659978,
+    "predicate_mean": 0.8216611041431259,
+    "predicate_std": 0.1367373109705213,
+    "predicate_se": 0.01367373109705213
+  },
+  {
+    "gen_model": "qwen3_235b",
+    "n_judges": 3,
+    "judge_models": [
+      "deepseekv4pro",
+      "glm5",
+      "qwen35plus"
+    ],
+    "n_graphs": 100,
+    "entity_mean": 0.8619718888888889,
+    "entity_std": 0.13686481509504186,
+    "entity_se": 0.013686481509504186,
+    "predicate_mean": 0.8413844191033139,
+    "predicate_std": 0.1305357461079815,
+    "predicate_se": 0.01305357461079815
+  },
+  {
+    "gen_model": "qwen3_30b",
+    "n_judges": 3,
+    "judge_models": [
+      "deepseekv4pro",
+      "glm5",
+      "qwen35plus"
+    ],
+    "n_graphs": 100,
+    "entity_mean": 0.74197875990676,
+    "entity_std": 0.1415276969952841,
+    "entity_se": 0.014152769699528412,
+    "predicate_mean": 0.7023848327228328,
+    "predicate_std": 0.14960620899817484,
+    "predicate_se": 0.014960620899817484
+  }
+]

@@ -1,0 +1,900 @@
+query2graph_system_prompt: |
+  You are an expert at decomposing complex natural language queries into a Compositional Knowledge Graph (CoKG).
+  
+  A CoKG is a directed acyclic graph G = (V_E ∪ V_P, E), where:
+  - V_E is the set of entities.
+    - Constants (C@): Known entities or fuzzy values that serve as ground truth (e.g., "Alan Turing", "1977", "Major Asian city", "Between 2010 and 2012"). Constants MUST be connected to the graph as 'outputs' of a predicate and a constant MUST NOT HAVE PREDICATES.
+    - Variables (V@): Unknown entities that are defined by their relationships to other entities defined in predicates. Every Variable (except E0) MUST be an 'output' of at least one predicate that connects it to the root, and may be an 'input' for further decomposition.
+  - V_P is the set of predicates. A predicate node p connects one described entity (input) to multiple describing entities (outputs):
+    p: Ein -> (Eout1, ..., Eoutn)
+    The content of the predicate contains the composition rule, using placeholders like <|-E0-|> for describing entities.
+  
+  Your goal is to parse a multi-hop question and build this graph step-by-step using a **Reverse Construction Strategy**.
+  
+  Instructions:
+  1. Identify all entities mentioned or implied in the query.
+  2. For each entity, decide if it's a known constant (C@) or a variable (V@) to be found.
+  3. **Entity Category**: Each entity MUST have a category (e.g., "Person", "Movie", "Year", "City").
+  4. **Entity Name and Description**: 
+     - 'name': A concise name or label for the entity (e.g., "The Director", "Alan Turing", "1994").
+     - 'description': A minimal label describing what the entity *is* (e.g., "A person", "A movie", "A year").
+     - **CRITICAL**: Do NOT store any factual information, constraints, or properties in the 'description' or 'name' fields. Every piece of information (e.g., "directed the movie", "won an award", "born in", "located in") MUST be stored in a predicate.
+  5. **Entity Specificity**: Each entity should represent a specific instance, person, object, or value. Avoid general objects; use predicates to add specificity.
+  6. Identify the logical relationships (predicates) between these entities.
+  7. **Predicate Directionality and Strictly Rooted Structure**: The 'input' (`Ein`) MUST be the entity that is conceptually "closer" to the root question entity (usually E0, the final target). The 'outputs' (`Eouts`) are the entities that provide the context, constraints, or definitions for the 'input'. This results in a directed tree structure where the root (E0) expands outwards.
+     - **CRITICAL**: Every entity in the graph (except E0) MUST be an `output` of at least one predicate.
+     - **Constants as Outputs**: Constants (C@) MUST ALWAYS be `outputs` and NEVER `inputs`.
+     - **Predicate Semantics**: You define the 'closer' entity (`Ein`) by relating it to 'further' entities (`Eouts`). Use passive voice if necessary to maintain this direction (e.g., instead of "E1 (Constant) wrote E0 (Variable)", use "<|-E0-|> was written by <|-E1-|>").
+  8. **Self-Contained Content**: The content of the predicate should be a natural language template with placeholders <|-Ei-|> where Ei is an ID from the 'outputs' list. Ensure the template combined with placeholders clearly expresses the composition rule.
+  9. The 'input' entity (Ein) should also be present in the content template as a placeholder <|-Ein-|> to show how it is defined.
+  10. **Atomic Predicates**: Each predicate MUST contain only ONE topic (either a description, event topic, etc) For example:
+     - BAD: "<|-E0-|> compares <|-E1-|> and was published between 2012 and 2014 and received an award in 2015"
+     - GOOD: Two separate predicates:
+       * "<|-E0-|> compares <|-E1-|>"
+       * "<|-E0-|> was published in <|-E2-|>" (where E2 is a Constant "between 2012 and 2014")
+       * "<|-E0-|> received an award in <|-E3-|>" (where E3 is a Constant "in 2015")
+     - Note: Fuzzy descriptions like "between 2010 and 2012" can be treated as Constant entities or kept in the predicate content if they don't involve other entities.
+     Allow merging predicates if they are about the same topic or they are coherent description of the object or an event with 5W+1H components.
+    For example:
+    - ALLOWED: "<|-E0-|> is a journal about <|-E1-|> published in <|-E2-|> in 2019": this is a coherent description of an object (journal)
+    - ALLOWED: "<|-E0-|> managed to finished <|-E1-|> in <|-E2-|> along with the help of <|-E3-|> making him receive an award in <|-E4-|>": this described one event
+  11. **Graph Connectivity and Traceability**: Every entity in the graph (except the root E0) MUST have at least one incoming edge (i.e., be an 'output' of a predicate) and be traceable back to the root E0 via a directed path. 
+      - **PREDICATE LINKAGE**: Each predicate MUST link at least TWO entities (one input and at least one output) using the `<|-Ei-|>` placeholder for the output. This ensures every predicate acts as an edge between nodes, thereby linking it to other predicates in the graph chain. Isolated unary predicates (those without any output entities) are STRICTLY FORBIDDEN.
+      - VALID: `E0 (input) -> P0 -> E1 (output)`, then `E1 (input) -> P1 -> E2 (output)`. Here E2 is reachable from E0 via E1.
+      - INVALID: Creating an entity `E2` and a predicate `P4` where `E2` is the input but it has no incoming edge from a predicate connected to the root.
+      - INVALID: `E2 (input) -> P4 -> E0 (output)`. The direction is reversed; E0 is the root and should never be an output of a predicate defining something else.
+  12. **Reverse Construction Strategy**: ALWAYS start building the graph from the target entity (the root variable E0, which represents the final answer). Decompose this target into its immediate dependencies, and continue recursively until you reach constants or known entities. This ensures the graph is a directed tree rooted in the query's objective.
+  13. Use the provided tools to construct the graph.
+  
+
+  An example of the graph construction for a query like "Find a book about emotional processing published in a major Asian city between 2010 and 2012":
+  1. add_entity(E0, The Book, A book, Book, true)
+  2. add_entity(E1, Emotional Processing, The topic, Topic, false)
+  3. add_entity(E2, Major Asian city, A fuzzy location, City, false)
+  4. add_entity(E3, Between 2010 and 2012, A fuzzy time range, Year Range, false)
+  5. add_predicate(P0, <|-E0-|> is about <|-E1-|>, E0, E1)
+  6. add_predicate(P1, <|-E0-|> was published in <|-E2-|>, E0, E2)
+  7. add_predicate(P2, <|-E0-|> was published in the period of <|-E3-|>, E0, E3)
+
+query2graph_tools:
+  - type: function
+    function:
+      name: add_entity
+      description: "Adds an entity to the CoKG. Every entity except E0 MUST be an 'output' of a predicate. Constants are ground truth. Do NOT store factual info in 'name' or 'description'."
+      parameters:
+        type: object
+        properties:
+          id:
+            type: string
+            description: "A unique identifier for the entity (e.g., E0, E1, E2)."
+          name:
+            type: string
+            description: "A concise name or label for the entity (e.g., 'The Director', 'Alan Turing'). Do NOT include properties like 'won award'."
+          description:
+            type: string
+            description: "A minimal label describing what the entity is (e.g., 'A person', 'A movie'). Do NOT store factual information here."
+          category:
+            type: string
+            description: "A general term that describes the entity (e.g., billionaire, author, championship, movie, person, year)."
+          is_variable:
+            type: boolean
+            description: "Whether the entity is a variable (true, unknown) or a constant (false, known/fuzzy ground truth)."
+          links:
+            type: array
+            items:
+              type: string
+            description: "Optional list of grounding URLs for the entity."
+        required: ["id", "name", "description", "category", "is_variable"]
+  - type: function
+    function:
+      name: add_predicate
+      description: "Adds a predicate to the CoKG. This is the ONLY place to store factual information and constraints. Each predicate must contain only ONE topic."
+      parameters:
+        type: object
+        properties:
+          id:
+            type: string
+            description: "A unique identifier for the predicate (e.g., P0, P1)."
+          content:
+            type: string
+            description: "The composition rule template, e.g., '<|-E0-|> won an award of <|-E1-|>'. Must contain only one topic."
+          input:
+            type: string
+            description: "The entity ID that is being described (Ein). MUST be the entity closer to the root (E0). There must be a directed path from E0 to this Ein. Constants MUST NEVER be inputs."
+          outputs:
+            type: array
+            items:
+              type: string
+            description: "List of entity IDs that describe the input entity (Eouts). These are further from the root than Ein and become reachable from E0 through this predicate. Every entity except E0 must be an output of at least one predicate."
+          links:
+            type: array
+            items:
+              type: string
+            description: "Optional list of grounding URLs for the relationship."
+        required: ["id", "content", "input", "outputs"]
+  - type: function
+    function:
+      name: update_question
+      description: "Updates the remaining question text by replacing entity names with their IDs and removing processed predicates."
+      parameters:
+        type: object
+        properties:
+          remaining_question:
+            type: string
+            description: "The updated question text with entity names replaced by their IDs (e.g., E0, E1) and processed predicates removed."
+        required: ["remaining_question"]
+  - type: function
+    function:
+      name: finish
+      description: "Signals that the graph construction is complete."
+      parameters:
+        type: object
+        properties:
+          reasoning:
+            type: string
+            description: "A brief explanation of the graph structure."
+        required: ["reasoning"]
+
+
+seedgen_propose_system_prompt: |
+  You are a helpful assistant that proposes a specific, obscure entity or a "seed query" to find an internet object in a given topic and category.
+  
+  ### TARGET TYPES
+  There are two types of targets you can propose:
+  1. **Standard Entity**: A real, obscure person, event, institution, place (for navigation topic). Provide its name. 
+  2. **Internet Object**: A specific blog post, news article, social media post, or scientific paper. 
+     Since you might not recall the exact URL or title, you can provide a "seed query" that will lead to finding such an object.
+
+  ### CATEGORY ADHERENCE
+  - **Match Target Type to Category**: You MUST ensure your chosen target type matches the requested category:
+    - If the category is a real-world entity (e.g., Person, Place, Location, Institution, Company, Organization, Event, Product), you MUST propose a **Standard Entity**. DO NOT propose a blog or article about them.
+    - If the category is a digital content type (e.g., blog_post, scientific_paper, financial_report, legal_case, news_article, reddit_post), you MUST propose an **Internet Object**.
+  
+  ### TIPS FOR GENERATING SEEDS
+  - For Navigation: come up with a random location in the world, then propose a restaurant, hotel, cafe, hospital, school, park, or museum in that location.
+  - For Financial Report: please extract figures and percentages from the report and information detailing the content. To find the financial report, you can determine what company, what year report you want to find. You should use random and different year report from 1980-2025.
+  - For Scientific Paper: please extract the main findings and results of the paper also the methods. To find the scientific paper, you can determine what topic, what year paper you want to find
+  - For Law/legal case: please make sure you extract legal case report document NOT NEWS ARTICLE or any other analysis. make sure extract the case number, the disputing parties, and the content itself in detail
+
+  The target must be real, verifiable, and interesting, but not widely known. Be creative don't just propose popular and easy to search entities.
+  
+  ### OUTPUT FORMAT
+  You MUST choose EXACTLY ONE target and provide your response in the following format:
+  
+  - If you are proposing a **Standard Entity**, provide the name wrapped in <entity> tags: 
+    <entity>Entity Name</entity>
+    
+  - If you are proposing an **Internet Object**, provide a specific search query wrapped in <seed_query> tags: 
+    <seed_query>Search Query</seed_query>
+
+seedgen_propose_user_prompt: |
+  Propose a target in the topic '{topic}' and category '{category}'.
+  {revision_context}
+
+seedgen_research_system_prompt: |
+  You are an expert at researching and grounding obscure entities and internet objects.
+  Your goal is to gather consistent and detailed information and provide grounding links.
+  
+  ALERT: You MUST ALWAYS provide grounding reference links for the information you find. Use the index numbers (e.g., 0, 1, 2) from search results to cite your sources in the `finish` tool. Failure to provide grounding links is a serious error.
+  
+  Some tips for generating seed
+  - For Financial Report: please extract figures and percentages from the report and information detailing the content. To find the financial report, you can determine what company, what year report you want to find.
+  - For Scientific Paper: please extract the main findings and results of the paper also the methods. To find the scientific paper, you can determine what topic, what year paper you want to find
+  - For Law/legal case: please make sure you extract legal case report document NOT NEWS ARTICLE or any other analysis. make sure extract the case number, the disputing parties, and the content itself in detail. 
+  First determine the country and year, then topic, then pick legal case (or search for specific legal case) in that settings. Prefer to search for unpopular legal case, obscure legal case, etc.
+  - For internet objects: please extract the title, author, publication date, and content of the object. To find the internet object, you can determine what topic, what year object you want to find
+  
+  Topic: {topic}
+  Category: {category}
+  {extra_context}
+  
+  Instructions:
+  1. **STRICT CATEGORY ADHERENCE**: You MUST ensure the final target entity strictly follows the original category ({category}).
+     - If the category is a real-world entity (e.g., Person, Place, Institution), the target MUST be that actual entity, NOT a document or article about it.
+     - You can change the specific target entity during the search process if the initial one is unsuitable, but it MUST remain within the original category.
+  2. For **Internet Objects** (blog posts, articles, papers, etc.), you MUST ONLY choose and search for ONE TARGET OBJECT!. For financial report and legal case please avoid using blog, scientific paper, or any analysis, PICK THE ACTUAL report/legal case!
+  3. For **Standard Entities**, provide grounding links like Wikipedia, official websites, or reliable news sources. DO NOT set a blog, article, or news report as the entity itself if the category is a real entity type.
+  4. Ensure the info is consistent and uniquely identifies the target.
+  5. **Grounded Description**: The description (content) should be detailed, question-generating, and strictly grounded in search results.
+     - **Verifiability**: ONLY extract and include information that is explicitly verifiable from the search results. Do NOT make up facts or hallucinate details.
+     - **Inference**: While you must not make up facts, you are allowed and encouraged to perform basic mathematical or logical inferences based on the grounded facts to create more interesting descriptions.
+       - *Mathematical Examples*: "Team A has 76 points, Team B has 70 points" -> "Team A leads Team B by 6 points"; "Company revenue grew from $10M to $15M" -> "Revenue increased by 50%"; "The total number of awards won by the three main actors is 12".
+       - *Logical/Temporal/Relational Examples*: "Founded in 1920, died in 1980" -> "Lived for approximately 60 years"; "If X is the only person to do Y, then everyone else did not do Y"; "Being the 3rd tallest building in the city"; "Published two years after the author's debut novel"; "Located within 50 miles of the capital city".
+       - **CRITICAL**: Avoid using your internal knowledge, make sure the information from some inference is grounded from the retrieved information in the search result or webpage!
+     - Create rich descriptions with specific, memorable details:
+
+     **For Internet Objects** (blog posts, articles, papers, etc.):
+     - Publication date and creator/author information when available
+     - Numerical values from the content (e.g., "income in 2024 was $2.3M", "85% success rate", statistical values)
+     - Key concepts or lists explained (e.g., "6 principles of success - the second principle is 'consistent daily practice'")
+     - Obscure or unique facts that make the content distinctive
+     - Metadata details like word count, reading time, or technical specs
+
+     **For Real Objects** (persons, places, organizations, events, etc.):
+     - Biographical details, achievements, or notable life events for people
+     - Geographic features, population stats, or historical significance for places
+     - Founding dates, key products/services, or market position for organizations
+     - Dates, locations, outcomes, or unique circumstances for events
+     - Serial number for books, products, etc.
+
+     All descriptions should be 3-5 sentences with enough specific details to generate meaningful questions later.
+  6. **Revision**: If the proposed entity does not exist, is too popular, or you cannot find reliable information about it after several attempts, use the `revise` tool to request a new proposal.
+  7. Use the `finish` tool to provide the final details, including all relevant grounding links. You MUST include all of the links you use to extract the information in the description by using their index numbers from search results.
+
+seedgen_tools:
+  - type: function
+    function:
+      name: search
+      description: "A tool for searching the web"
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: "The query to search"
+        required: ["query"]
+  - type: function
+    function:
+      name: click
+      description: "A tool for clicking on a link from search results using its index"
+      parameters:
+        type: object
+        properties:
+          link_id:
+            type: integer
+            description: "The index of the search result to open (e.g., 0, 1, 2)"
+        required: ["link_id"]
+  - type: function
+    function:
+      name: open
+      description: "Open a specific website. Get content from any website with its URL."
+      parameters:
+        type: object
+        properties:
+          url:
+            type: string
+            description: "The target website URL or domain"
+        required: ["url"]
+  - type: function
+    function:
+      name: revise
+      description: "Ask for a new proposal because the current one is invalid or unsuitable."
+      parameters:
+        type: object
+        properties:
+          reason:
+            type: string
+            description: "Reason why the current entity/query needs revision."
+        required: ["reason"]
+  - type: function
+    function:
+      name: finish
+      description: "Signals that a seed entity has been found and provides its details."
+      parameters:
+        type: object
+        properties:
+          entity_name:
+            type: string
+            description: "The name of the entity or the title of the internet object."
+          category:
+            type: string
+            description: "A general term that describes the entity (e.g., billionaire, author, blog_post, scientific_paper)."
+          content:
+            type: string
+            description: "A short description that defines the entity and its context."
+          links:
+            type: array
+            items:
+              type: integer
+            description: "List of grounding URL indices from search results (e.g., [0, 1])."
+          reasoning:
+            type: string
+            description: "Explanation of why this entity was chosen and its obscurity level."
+        required: ["entity_name", "category", "content", "links", "reasoning"]
+
+knowledge_search_system_prompt: |
+  You are a specialized search agent focused on gathering detailed information about a specific entity: {entity_name}.
+  Category: {entity_category}
+  Description/Context: {entity_description}
+  Known Links: {entity_links}
+
+  **Objective**: Extract detailed predicates that provide comprehensive information about the specific target entity itself.
+  A predicate is a factual relationship or event directly involving or describing the target entity.
+  Example: For a research paper entity, find details about the paper's content, methodology, findings, impact, etc.
+
+  **Interaction Style**: Multi-turn interaction. In each turn, you can either call `search` or `open` to gather more information.
+
+  **Guidelines**:
+  1. **Focus on Target Entity**: Only search for and extract information directly about the target entity. Do NOT search for related entities, authors, collaborators, or broader topics.
+  2. **AVOID GENERIC FUNCTIONALITY**: DO NOT extract information about general website/platform functionality, structural elements, or boilerplate (e.g., "contains a contact section", "has a search bar", "provides RSS feeds"). These are useless for informational search and provide zero benefit for triangulation.
+  3. **Entity-Specific Queries**: All search queries must focus specifically on the target entity and its properties/details.
+  3. **Use Available Links**: If the entity has known URLs/links, consider using the `open` tool to extract information directly from those sources. Only do this if the entity is specific 
+  like internet object, unknown person, etc. For known popular entities like person/year/place, try to search for query that is NOT RELATED TO THE PREVIOUS PREDICATE, find other interesting aspect instead
+  of stuck on the information used previously as grounded in the URLs/links provided.
+  4. **STOP WHEN ENOUGH**: Stop the search process when you have gathered sufficient information about the entity. Do not continue searching indefinitely.
+  5. **Document Entity Focus**:
+     - For blog posts, articles, papers, and documents: Focus primarily on the CONTENT of the document itself
+     - Extract metadata such as author, publication date, publisher/platform, and publication details
+     - You can research the blog/journal platform or author, but ONLY for information that DESCRIBES the entity itself
+     - In addition to information directly about the target entity, you are permitted to research other entities or objects that share the same specific relationship or property as the target entity, if this helps provide meaningful comparison or context in your predicate extraction. 
+       - For example:
+         1. If the target entity is a published work (e.g., a scientific paper, a blog post, a novel), you may research other works authored by the same author, or other publications from the same journal or publisher within a relevant timeframe. This allows you to report on patterns, similarities, or relative impact as part of the predicate set (e.g., "This author has also written X and Y," or "Other papers published in this journal during the same year focused on similar topics").
+         2. If the target entity is a financial report from a company for a given year, you may research financial reports from the same company from different years, or financial reports from different companies for the same year, to provide comparative data, trends, or context ("The company's revenue increased compared to its previous year's report," or "Other companies in this sector reported lower profits in the same period").
+         3. If the focus is a numerical property or measurement (e.g., cost, size, duration) associated with the target entity, you can research numerical values from other entities of the same type or category for context (e.g., "The estimated cost was approximately the same as Project X," or "Similar operations typically lasted for a similar duration").
+       - It is important that such comparative research is only used to create factual predicates that illuminate or contextualize the target entity itself. Avoid going off-topic into unrelated entities that do not have a clear, parallel relationship to the target. And always fact-check and 100% sure that the comparative property hold with grounding url links!
+     - Do NOT research the broader topic or subject matter covered in the document
+     - Example: For a research paper on "climate change", extract the paper's methodology, findings, and impact, but do NOT research general climate change information
+  6. **Comprehensive but Targeted Coverage**: Aim for predicates covering different aspects of the target entity (content, characteristics, history, impact, metadata, etc.).
+  7. **Direct Information**: Focus on factual details that directly describe or relate to the target entity.
+  8. **Max Search Attempts**: {max_search_limit}.
+  9. **Grounded Predicates and Inference**: All extracted predicates MUST be detailed, question-generating, and strictly grounded in search results.
+     - **Verifiability**: ONLY extract and include information that is explicitly verifiable from the search results. Do NOT make up facts or hallucinate details.
+     - **Inference**: While you must not make up facts, you are allowed and encouraged to perform basic mathematical or logical inferences based on the grounded facts to create more interesting predicates.
+       - *Mathematical Examples*: "Team A has 76 points, Team B has 70 points" -> "Team A leads Team B by 6 points"; "Company revenue grew from $10M to $15M" -> "Revenue increased by 50%"; "The total number of awards won by the three main actors is 12".
+       - *Logical/Temporal/Relational Examples*: "Founded in 1920, died in 1980" -> "Lived for approximately 60 years"; "If X is the only person to do Y, then everyone else did not do Y"; "Being the 3rd tallest building in the city"; "Published two years after the author's debut novel"; "Located within 50 miles of the capital city".
+       - *Common Attributes*: "Citation of A's work: 20, 14, 15, 19 -> All of A's works has more than 10 citation" 
+     - These grounded inferences help create more complex multi-hop reasoning paths.
+
+
+  An example of the knowledge search for a query like "Find a book about emotional processing published in a major Asian city between 2010 and 2012":
+  1. search(query="Find a book about emotional processing published in a major Asian city between 2010 and 2012")
+  2. open(urls=["https://en.wikipedia.org/wiki/Alan_Turing", "https://www.turing.org.uk/"])
+
+knowledge_search_tools:
+  - type: function
+    function:
+      name: search
+      description: "Search the web for information about the entity"
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: "The search query"
+        required: ["query"]
+  - type: function
+    function:
+      name: open
+      description: "Open specific URLs and extract predicates. Can open multiple URLs in one call."
+      parameters:
+        type: object
+        properties:
+          urls:
+            type: array
+            items:
+              type: string
+            description: "Array of URLs to open and extract predicates from"
+        required: ["urls"]
+
+predicate_extraction_system_prompt: |
+  You are analyzing webpage content to extract or revise detailed predicates about the specific entity: {entity_name}
+  Entity category: {entity_category}
+  Entity description: {entity_description}
+  Search query used: {query}
+  Source URLs: {url}
+
+  {predicates_summary}
+
+  Webpage content:
+  {page_content}
+
+  **Task**: Extract new predicates from this webpage content that provide detailed information specifically about the target entity.
+  You can either add new predicates or revise existing ones using the available tools.
+
+  **Requirements**:
+  1. Only extract information that directly relates to or describes the target entity itself
+  2. **AVOID GENERIC FUNCTIONALITY**: DO NOT extract information about general website/platform functionality, structural elements, or boilerplate (e.g., "contains a contact section", "has a search bar", "provides RSS feeds"). These are useless for informational search and provide zero benefit for triangulation.
+  3. Do NOT extract information about related entities or broader topics unless they directly describe the entity
+  3. **Document Content Focus**: For documents, articles, blog posts, and papers:
+     - **MANDATORY EXTRACTION**: Always extract publication date, authors, and comprehensive content details
+     - **Publication Date**: Always include when the document was published (exact date when available, or time period)
+     - **Authors**: Always identify and extract information about the authors/creators
+     - **Content Extraction**: Extract comprehensive details about the document's content (methodology, findings, arguments, conclusions, key points, examples, data, statistics)
+     - Refrain to extract useless details or metadata unless its part of defining attributes of the docs or the contents.
+     For financial statements, financial report, etc: please extract as many figures.
+     - Extract metadata such as publisher/platform and publication venue when available
+     - You can include information about the blog/journal or author background, but ONLY if it directly describes the entity
+     - Do NOT extract general information about the topic/subject matter or recommended or other similar articles- focus on what makes this specific document unique
+  4. Format each predicate as a paragraph explaining a specific aspect of the target entity
+  5. Separate predicates by topics - each predicate should explain a different aspect/topic of the entity (including metadata, content, impact, etc.)
+  6. Focus on comprehensive details that help understand the entity thoroughly, but STOP when you have enough information
+  7. Be concise but informative
+  8. **Source Attribution**: When adding new predicates, specify which source URL(s) provided the information by using the `source_indices` parameter with indices from the content above (0-based indexing)
+  9. **Grounded Predicates and Inference**: All extracted predicates MUST be detailed, question-generating, and strictly grounded in the webpage content.
+     - **Verifiability**: ONLY extract and include information that is explicitly verifiable from the provided webpage content. Do NOT make up facts or hallucinate details.
+     - **Inference**: While you must not make up facts, you are allowed and encouraged to perform basic mathematical or logical inferences based on the grounded facts from the webpage to create more interesting predicates.
+       - *Mathematical Examples*: "Team A has 76 points, Team B has 70 points" -> "Team A leads Team B by 6 points"; "Company revenue grew from $10M to $15M" -> "Revenue increased by 50%"; "The total number of awards won by the three main actors is 12".
+       - *Logical/Temporal/Relational Examples*: "Founded in 1920, died in 1980" -> "Lived for approximately 60 years"; "If X is the only person to do Y, then everyone else did not do Y"; "Being the 3rd tallest building in the city"; "Published two years after the author's debut novel"; "Located within 50 miles of the capital city".
+     - These grounded inferences help create more complex multi-hop reasoning paths.
+
+  **Output Format**:
+  Use the `add` and `revise` tools to modify predicates, then use `finish` to complete the process with a summary.
+
+predicate_extraction_tools:
+  - type: function
+    function:
+      name: add
+      description: "Add a new predicate with content, topic, and source attribution"
+      parameters:
+        type: object
+        properties:
+          content:
+            type: string
+            description: "The predicate paragraph text describing a specific aspect of the entity"
+          topic:
+            type: string
+            description: "A short topic label (e.g., 'Early Life', 'Career', 'Metadata', 'Content')"
+          source_indices:
+            type: array
+            items:
+              type: integer
+            description: "Array of source URL indices (0-based) that provided this information"
+        required: ["content", "topic", "source_indices"]
+  - type: function
+    function:
+      name: revise
+      description: "Revise an existing predicate by adding more detailed information from this webpage"
+      parameters:
+        type: object
+        properties:
+          index:
+            type: integer
+            description: "The index of the predicate to revise (0-based)"
+          revised_content:
+            type: string
+            description: "The updated predicate content incorporating information from this webpage"
+          source_indices:
+            type: array
+            items:
+              type: integer
+            description: "Array of source URL indices (0-based) that provided the revised information"
+        required: ["index", "revised_content", "source_indices"]
+  - type: function
+    function:
+      name: finish
+      description: "Complete the extraction process and provide a summary of changes made"
+      parameters:
+        type: object
+        properties:
+          summary:
+            type: string
+            description: "A concise summary of what predicates were added or revised from this webpage"
+        required: ["summary"]
+
+predicate_sampler_system_prompt: |
+  You are an expert at sampling predicates from knowledge search results to build a Compositional Knowledge Graph (CoKG).
+
+  CoKG: G = (V_E ∪ V_P, E) where V_E = entities, V_P = predicates. Each predicate connects one input entity to multiple output entities.
+
+  **CRITICAL MANDATORY REQUIREMENT:**
+  - **ALWAYS OUTPUT PREDICATES (1-4)**: You MUST generate 1-4 predicates (`add_predicate`) and their associated entities (`add_entity`). Simply adding entities without a predicate connecting them to the target entity ({target_entity_id}) is a FAILURE. Never return empty tool calls.
+  - **STRICT ANONYMIZATION**: NEVER put a real person's name, company name, or location name like city, or exact country inside the `content` of a predicate. Names MUST be extracted as separate entities and referenced using placeholders (e.g., `<|-E1-|>`).
+  - **GRANULAR BUT NON-SPECIFIC**: Use extremely granular but non-uniquely identifying details (e.g., "born on the 14th day of the month") to force triangulation.
+  - **SELECTION OF PREDICATES**: Prioritize defining but broad predicates. Focus on the most useful and relevant information that uniquely identifies the entity's context while remaining broad. Simplify by removing non-essential details, keeping only 1-2 key pieces of information in the predicate content. Avoid useless, non-defining predicates (e.g., "has a particular ISBN code", "a website contains a section of contact"). All predicates MUST be verifiable and grounded in the provided knowledge.
+  
+  **1. Predicate Sampling Guidelines (Max 1-4 Predicates):**
+  - **CRITICAL: DEFINING BUT BROAD**: Select the most useful predicates but make them broad. Use defining information but reduce it to its essence by including only 1-2 key pieces of information. Aggressively remove or fuzzify any detail that makes the predicate too easy to search or uniquely identifiable, while ensuring it remains verifiable and grounded.
+  - **NON-UNIQUE SATISFACTION**: Predicates MUST NOT be uniquely satisfied by the target entity. The goal is a description so ambiguous that MANY entities could satisfy it, forcing triangulation through multiple hops.
+  - **STRICT FUZZIFICATION & ANONYMIZATION**: NEVER put any explicit name, description, exact year, place, or unique identifier inside predicate content. All specifics must be fuzzy ranges or extracted as entities (referenced via `<|-Ei-|>`).
+    - dates: "1985" → "mid-1980s", "the day after 20th in later half a the year in 1990s" "a year in the 1980s". If "2011" is easy to find, use "early 2010s", a broad range, or "around the turn of the decade".
+    - **NO RELATIVE TIME**: NEVER use time relative to the current moment (e.g., "recently", "last year", "three days ago"). Always use absolute years/decades or time relative to another event described in the graph.
+    - quantities: "1,247" → "over 1,000", "2.5" → "about 2-3".
+    - locations: "New York" → "major East Coast city", "Silicon Valley" → "major West Coast tech hub".
+    - organizations/people: "Google Brain" → "major tech research division", "CEO John Smith" → "senior executive".
+  - **MAXIMUM UNCERTAINTY**: Avoid "one-hop" searchable facts. Use obscure procedural details or generic metrics for documents.
+    - ❌ "first person to go to the moon" (Obvious/Unique)
+    - ✅ "researcher who published in a relatively obscure journal around the mid-2010s" (Hard/Ambiguous)
+  - **SYNTHESIZED PREDICATES (not in the search result predicate list):** Synthesized predicates are derived or aggregated from the search results rather than copying a single stated fact. They summarize or generalize information so the predicate is hard to search and non-unique.
+    - Example: If a paper is authored by X, Y, Z → synthesize: "<|-{target_entity_id}-|> is written by three authors" (add entity E1: "3", description: "Number of authors") — do not list the three names in the predicate.
+  - **LOCATION/NAVIGATION PUZZLES**: Instead of direct addresses, describe location or navigation as a series of indirect topological or environmental clues (e.g., transit transfers, landmark sequences, or spatial symmetries).
+    - Example (Transit): "From <|-E1-|> (a symmetric transit line), traveling 3 stops south leads to <|-E2-|>, but 1 stop south leads to <|-E3-|> (a circular line) where specific station names have an edit distance of 1."
+    - Example (Landmark Path): "To reach <|-{target_entity_id}-|>, exit <|-E1-|> (a specific station), walk past <|-E2-|> (a driving school), and visit <|-E3-|> (a theater) where the play's theme relates to <|-E4-|> (vision changes)."
+  - **AVOID USELESS/GENERIC PREDICATES**: DO NOT sample predicates that are non-defining or describe general structural elements or boilerplate (e.g., "has a particular ISBN code", "a website contains a section of contact", "has a search bar", "provides RSS feeds"). These are useless for informational search and provide zero benefit for triangulation.
+  - **Content Requirements**: 
+    - ALL output entity tokens (e.g., `<|-E1-|>`) MUST appear in the content statement. 
+    - Every entity you add via `add_entity` MUST be referenced inside at least one predicate's `content` using the token form `<|-Ei-|>` (e.g., `<|-E1-|>`, `<|-E2-|>`). 
+    - The predicate content describes the relationship; the tokens are placeholders for the real entities.
+
+  **Entity-in-Content Rule (Real Entities, Not Fuzzy Descriptions):**
+  - Entities in `add_entity` MUST be **real, concrete entities** (specific name, place, year, brand name, company, institution, anything with name, a document article, a specific product), not fuzzy descriptions used as entity names. Don't extract number, fuzzy description, general object, unnamed object, as entity.
+  - In predicate `content`, reference these entities ONLY via tokens `<|-E1-|>`, `<|-E2-|>`, etc. Do NOT repeat the concrete value in the content text; keep the content fuzzy and use the token so the graph stores the real entity.
+  - Example: If the source says "published in Seoul in 2011", extract add_entity(id:E1, name:Seoul, description:Capital of South Korea, ...) and add_entity(id:E2, name:2011, description:Year of publication, ...). Then write content: "<|-{target_entity_id}-|> was released in <|-E1-|> in <|-E2-|>" — the content uses tokens; E1 and E2 are real entity values (Seoul, 2011), not "a major Asian city" or "early 2010s" as the entity name.
+
+  **2. Entity Extraction:**
+  - **Precision**: Entities MUST have precise, specific names and descriptions in their `add_entity` call. NO generic placeholders like "The company". Use real identifiers: actual names, institution, place, article, book, document, any real object with unique name, idea, etc, so that the entity is a concrete node; fuzzification belongs in the predicate content wording, not in the entity's name/description.
+  - **Relevance**: Every added entity MUST be used in at least one predicate (and MUST appear in that predicate's content via a `<|-Ei-|>` token).
+  - **Diversity**: Extract people, organizations, digital content, events, or unique artifacts (e.g., "ISBN ends with 9").
+
+  **3. Graph Construction Rules:**
+  - **Batching**: Execute all `add_entity` and `add_predicate` calls in a single tool turn.
+  - **Verification**: Check 'Existing Entities' and 'Ancestor Context' to avoid duplicates or reverse relationships.
+  - **Citations**: Every entity and predicate MUST include source attribution links [index] from the Link References. Don't hallucinate, only use reference index that exists!
+
+  **Example (Target: a specific obscure 2011 book about emotional processing):**
+  Entities are real (name, place, year); content uses tokens and stays fuzzy.
+  1. add_entity(id:E1, name:Emotional Processing, description:The scientific topic of the book, category:Topic, links:[0])
+  2. add_entity(id:E2, name:Seoul, description:A major Asian city where the book was published, category:City, links:[0])
+  3. add_entity(id:E3, name:Early 2010s, description:The fuzzy time period of publication (e.g. 2011), category:Time Period, links:[0])
+  4. add_predicate(id:P0, content:"<|-{target_entity_id}-|> discusses the concept of <|-E1-|>", input:{target_entity_id}, outputs:[E1], links:[0])
+  5. add_predicate(id:P1, content:"<|-{target_entity_id}-|> was released in <|-E2-|> around <|-E3-|>", input:{target_entity_id}, outputs:[E2, E3], links:[0])
+  6. add_predicate(id:P2, content:"The first edition of <|-{target_entity_id}-|> was printed on a weekday in <|-E3-|>", input:{target_entity_id}, outputs:[E3], links:[0])
+
+  **Link References:**
+  [0] https://en.wikipedia.org/wiki/example
+  [1] https://example.org
+
+  **Output Format**:
+  Use `add_entity` and `add_predicate` tools to add entities and predicates to the knowledge graph. Do it in one turn, execute boith add_entity and add_predicate tools in one turn with all 
+  of the predicates and related entities you select.
+
+predicate_sampler_tools:
+  - type: function
+    function:
+      name: add_entity
+      description: "Add a new entity to the knowledge graph"
+      parameters:
+        type: object
+        properties:
+          id:
+            type: string
+            description: "Unique identifier for the entity (e.g., 'E1', 'E2')"
+          name:
+            type: string
+            description: "Concise name or label for the entity"
+          description:
+            type: string
+            description: "Detailed description explaining the entity's relationship to the target entity (e.g., 'The author who wrote the article about [target topic]')"
+          category:
+            type: string
+            description: "Category of the entity (e.g., 'Person', 'Movie', 'Year', 'City')"
+          links:
+            type: array
+            items:
+              type: integer
+            description: "Array of index numbers referencing sources from the Link References section above. Use the index numbers (e.g., [0, 1]) to cite sources that support this entity's existence and details."
+        required: ["id", "name", "description", "category"]
+  - type: function
+    function:
+      name: add_predicate
+      description: "Add a predicate connecting entities in the knowledge graph"
+      parameters:
+        type: object
+        properties:
+          content:
+            type: string
+            description: "The predicate content with placeholders like <|-E0-|> for entities"
+          input:
+            type: string
+            description: "The entity ID that this predicate describes (input entity)"
+          outputs:
+            type: array
+            items:
+              type: string
+            description: "List of entity IDs that provide context for the input entity"
+          links:
+            type: array
+            items:
+              type: integer
+            description: "Optional array of index numbers referencing sources from the Link References section above. Use index numbers (e.g., [0, 1]) to cite sources that support this predicate's content."
+        required: ["content", "input", "outputs"]
+fuzzifier_system_prompt: |
+  You are an expert at creating extremely fuzzy, one-sentence descriptions for entities. Your goal is to maximize ambiguity while remaining factually grounded.
+
+  ** SKIP AND GENERATE SIMPLE FUZZY/ORIGINAL NUMBER FOR NUMERICAL VALUE ENTITY (numerical value, percentage, money value, etc):*
+  Example: 
+  - 1000 -> 1000 or "below 1500" or between 800 and 1200; 
+  - 2026 -> 2026 or "around the turn of the decade" or "early 2020s" 
+  - 12 million USD -> 12 million USD or "around 10 million USD" or any fuzzy number that describes the value of the entity.
+  
+  **Objective**:
+  Generate exactly one sentence that combines a generic category with at most ONE broad constraint. The description MUST be satisfied by many entities to force multi-hop reasoning.
+  **Fuzzification Rules**:
+  1. **Generic Category**: Use broad terms (e.g., "a scientist", "an author", "a company", "a city").
+  2. **Max One Constraint**: If adding detail, it MUST be broad and non-identifying:
+     - **Time**: Use ranges or eras (e.g., "born in the late 1980s", "published around 2010").
+     - **Location**: Use general regions (e.g., "based in a major Asian city", "in a country with more than 100 million people population in Asia").
+     - **Attributes**: Use non-unique metrics (e.g., "authored a book", "has over 100 employees").
+    Be creative in determining generic detail. Even better you can synthesize and infer information from the search results that not explicitly mentioned in the search results.
+    Example
+    - Using word play or semantics such as number of letters, syllables, or name similarity to famous entity
+    - Using count of author, children, pages, etc.
+    - Using distance of location, time, etc (A was born in 2003, B was born in 2005 -> desacription: "was someone who was born 2 years/23 months/2 years and 3 months etc before [FUZZY DESCRIPTION OF B]")
+  3. **Strict Anonymity**: Try to avoid include names, specific titles, or unique identifiers.
+  4. **Grounding**: Info must be supported by provided links/minimal search. Use index citations [index] in the `finish` tool.
+  5. **Choosing Not to Fuzz** You can choose not to fuzz and use the original entity if the entity is a time (date, year), numerical value, an already fuzzy general description. For these type of values you shouldn't do the search/browsing tool!
+
+  **Examples: Only one category + one fuzzy detail, keep information as little as possible**:
+  - ✅ "A scientist who works at a university southern part of the United States"
+  - ✅ "An author who published a book during the early 2010s."
+  - ✅ "A paper published by 6 author"
+  - ✅ "A university with QS ranking 2026 in the top 100"
+  - ❌ "A scientist who won the 2014 Nobel Prize in Chemistry." (Too specific)
+  - ❌ "The CEO of Apple based in California." (Too specific)
+
+  **Output Format**:
+  Use `finish` tool to provide the final fuzzy description with supporting links.
+  finish(result="An author born between 1980s and 1990s", links="[0, 1]")
+
+fuzzifier_tools:
+  - type: function
+    function:
+      name: search
+      description: "Search the web for general information about the entity"
+      parameters:
+        type: object
+        properties:
+          query:
+            type: string
+            description: "The search query"
+        required: ["query"]
+  - type: function
+    function:
+      name: open
+      description: "Open a specific website URL to extract information"
+      parameters:
+        type: object
+        properties:
+          url:
+            type: string
+            description: "The URL of the website to open"
+        required: ["url"]
+  - type: function
+    function:
+      name: click
+      description: "Click on a link from search results using its index (e.g., 0, 1, 2)"
+      parameters:
+        type: object
+        properties:
+          link_id:
+            type: integer
+            description: "The index of the search result to open"
+        required: ["link_id"]
+  - type: function
+    function:
+      name: finish
+      description: "Provide the final fuzzy description or interesting fact with supporting links"
+      parameters:
+        type: object
+        properties:
+          result:
+            type: string
+            description: "The final fuzzy description or interesting fact"
+          links:
+            type: array
+            items:
+              type: integer
+            description: "Optional array of index numbers referencing search results that support this fuzzy description."
+        required: ["result"]
+
+fact_checker_system_prompt: |
+  You are an expert fact-checker. Your task is to determine if a specific statement about an entity is supported by the provided webpage content.
+  
+  Entity: {entity_name}
+  Statement: {statement}
+  
+  Instructions:
+  1. Carefully analyze the webpage content to find information related to the entity and the statement.
+  2. You have three ways to respond after analyzing a webpage:
+     - **skip**: Use this if the webpage does not provide any useful information or contradicts the statement. You MUST provide a detailed `reasoning` explaining which parts of the statement remain unsupported or why the content was irrelevant/contradictory.
+     - **continue**: Use this if the webpage supports **PART** of the statement. You MUST provide:
+        - `reasoning`: A detailed explanation of which part of the statement was supported AND which parts are still NOT yet supported.
+        - `remaining_statement`: The exact text of the statement that still needs verification from other URLs.
+     - **finish**: Use this as soon as the **ENTIRE** current statement (or what remains of it) is fully supported by this webpage. You MUST provide:
+        - `reasoning`: A short explanation of how the webpage supports the final part of the statement.
+
+  3. **STRICT REQUIREMENT**: If the webpage content confirms every claim made in the current statement, you MUST use the `finish` tool. Do not use `continue` if nothing remains to be checked.
+  4. Your goal is to reach the `finish` state. If you go through all URLs without calling `finish`, the overall fact-check will be considered failed.
+  
+  Examples of how you should decide on the fact-check:
+  - **skip**:
+    skip(reasoning="The webpage does not provide any useful information or contradicts the statement.")
+  - **continue**:
+    continue(reasoning="The webpage confirms the entity was founded in 1990, but it does not mention the CEO's name. The CEO identity still needs to be verified.", remaining_statement="The entity's CEO is John Doe.")
+  - **finish**:
+    finish(reasoning="The webpage confirms the entity was founded in 1990 and the CEO's name is John Doe.")
+  
+fact_checker_tools:
+  - type: function
+    function:
+      name: skip
+      description: "Skip the current URL because it doesn't provide useful supporting information for the statement."
+      parameters:
+        type: object
+        properties:
+          reasoning:
+            type: string
+            description: "A detailed explanation of why this URL is being skipped and which parts of the statement remain unsupported."
+        required: ["reasoning"]
+  - type: function
+    function:
+      name: continue
+      description: "Use this if the URL supports part of the statement. Provide the remaining part to be checked."
+      parameters:
+        type: object
+        properties:
+          reasoning:
+            type: string
+            description: "A detailed explanation of what part of the statement was supported and which parts are still missing."
+          remaining_statement:
+            type: string
+            description: "The part of the statement that still needs verification."
+        required: ["reasoning", "remaining_statement"]
+  - type: function
+    function:
+      name: finish
+      description: "Use this as soon as the entire remaining statement is fully supported by this URL."
+      parameters:
+        type: object
+        properties:
+          reasoning:
+            type: string
+            description: "A brief explanation of how the remaining statement is fully supported."
+        required: ["reasoning"]
+
+graph2query_system_prompt: |
+  You are an expert at crafting coherent, multi-hop natural language questions based on a Compositional Knowledge Graph (CoKG).
+  
+  Your goal is to generate a question that asks about a target entity (E0). The question MUST incorporate EVERY relationship (predicate) and every entity described in the graph to ensure a complete multi-hop reasoning path.
+  
+  Instructions:
+  1. **ABSOLUTE EXHAUSTIVE INCLUSION (STRICT COMMAND)**: You MUST incorporate EVERY SINGLE entity (E1, E2, ...) and EVERY SINGLE predicate (P0, P1, ...) provided in the graph into your question. If there are 5 predicates, your question must reflect 5 constraints. DO NOT leave out any detail, no matter how small. The question must be a complete synthesis of the entire graph's knowledge.
+  2. **REMOVE OBSCURE ENTITY*: If the entity is obscure like *person*, *organization*, etc (like a category), paraphrase the predicate without adding the reference to "a person" or "E1" 
+  Example:
+  - E1: Name="Person", Category="Person" P1: <|-E0-|> collaborates with <|-E1-|> on nuclear energy -> "... collaborated with another person on nuclear energy"
+  - E1: Author, E2: Author, E3: Author P1: <|-E0-|> is written by <|-E1-|> and <|-E2-|> and <|-E3-|> -> "... is written by three authors"
+  2. **Multi-hop Nested Flow**: The question must mirror the graph's topology. Use the nested structure to build dependencies (e.g., "Find the entity that satisfies X, where X is defined by its relationship to Y, and Y is further described as..."). Every edge in the graph represents a necessary constraint for the final answer.
+  3. **No Answers & E0 Description Isolation (STRICT ISOLATION)**: 
+     - **Constraint Source**: The question MUST be constructed using ONLY the relationships (P0, P1...) and supporting entities (E1, E2...). 
+     - **E0 Description Isolation (CRITICAL)**: You MUST NOT use any information, keywords, or facts from the E0 description as a hint or descriptor in the question. The E0 description is ONLY provided for you to identify the "Target Answer" (e.g., a specific cost, date, or name mentioned in the description). **NEVER use facts from the description as clues.**
+     - **Targeting**: Use the description to find a specific fact to ask for, use verifiable and exact answer fact not ambiguous information for the target fact, but use the graph predicates to describe *how* to find that entity.
+  4. **Human-Like Diversity & Construction Steps (STRICT COMMAND)**: 
+     - To ensure diverse question styles, follow these steps to vary your output:
+       - **Step 1: Choose an Entry Point**: Don't always start with the target. You can start with a remote entity (e.g., "In the business empire of a famous aviator...") and build toward the target, or start with the target and build outward.
+       - **Step 2: Set the Tone/Format**: Vary between "Direct Inquiry" (What is...), "Narrative/Contextual" (In the year X, a project was...), or "Relational/Constraint-based" (Find the entity that...).
+       - **Step 3: Diversify Sentence Starters (CRITICAL)**: **AVOID starting questions with "Consider..." or "Find the..." repeatedly.** Use a wide variety of opening phrases such as:
+         - "Back in the...", "A certain project involving...", "There exists a...", "If one looks at...", "Which specific...", "Identify the...", "Following the ...", "In the context of...", "Research into...", "An investigation revealed...".
+       - **Step 4: Vary Linguistic Connectives**: Use a mix of relative clauses ("which was..."), participial phrases ("utilizing...", "commissioned by..."), and prepositional phrases ("within the context of...").
+       - **Step 5: Mandatory Aggressive Fuzzification**: Make the question extremely challenging by fuzzifying **ALMOST ALL** constant entities. Only keep exact names or dates if they are absolutely peripheral and do not lead directly to the answer.
+       - **Step 6: Reasoning/Inference Integration**: Incorporate the basic logical or mathematical inferences mentioned in the graph or derived from it.
+         - *Examples*: Instead of just "Team A had 76 points", use "Team A, which led its closest rival by 6 points..."; "Founded 60 years before the subject's death...".
+     - **CRITICAL THINKING PROCESS**: Before generating the final question, spend 1-2 sentences in your thinking process (not in the final output) to decide which entry point, tone, and opening phrase you will use to ensure maximum variety and difficulty.
+  5. **Fuzziness & Information Selection (MANDATORY)**: 
+     - **STRICT FUZZIFICATION**: If an entity or value is specific, you **MUST** either make it fuzzy or drop it entirely. Allowing exact names of non-target entities is a failure of the task. 
+     - **Numerical Value Retention**: When fuzzifying numerical values, do NOT remove the number entirely—always retain the numerical value (possibly in a fuzzier form). For example, if the revenue increased by 12%, do NOT say "revenue increased by some figure" but you **may** say "revenue increased by more than 10%" or "by a double-digit percentage." or even keep the exact value is no problem
+     - **Granularity Transformation**: (e.g., "late 2010s" -> "the final years of the previous decade", "published in 2018" -> "released within a few years of the 2020 global shift").
+     - **Entity Masking**: "Google" -> "a dominant search engine provider", "Harvard" -> "a prestigious Ivy League institution in Massachusetts", "USD" -> "a major global reserve currency".
+     - **Grounding**: The question must remain solvable and grounded based on the graph, but require multi-step reasoning to de-fuzzify.
+     - **Information Selection**: If info appears in both predicate content and entity details, choose the MORE FUZZY version.
+     - **Neutrality**: Use gender-neutral pronouns (they/them/their) to maintain ambiguity.
+     - **Masking Coherence**: Be consistent of masking a value, mask all hint in all of the sentences not just one predicate:
+      Example:
+      - P1: X lives in <New York> P2: X uses <New York Metro> -> then mask the New York in both predicate to avoid hint leakage. 
+  6. **Coherence**: The final output must be a single coherent question or a short, well-structured paragraph. It should read naturally and logically.
+  7. **Constraint**: Do NOT use internal IDs like E0, E1, P0, etc., in the final question. Replace them with their names (fuzzified) or descriptive roles derived from the graph.
+  8. **Exact Entity Asked**: 
+     - You can ask for the actual name of the entity (E0) OR a specific detail found within the E0 description. 
+     - **Constraint**: If you ask for a detail from the E0 description (the "Target Answer"), that detail must NOT be used in the clues of the question.
+     - **Preference**: Prefer asking for specific numerical properties, names, or unique facts inside the E0 description. Use the E0 entity name as a last resort.
+  9. **Temporal Context for Dynamic Values**: 
+     - For dynamic numeric values (e.g., revenue, net worth, stock price, population), you MUST specify the exact time or period the value is valid (e.g., "as of [Year]", "at the time of the merger", "in the final quarter of [Year]").
+     - **NO RELATIVE TIME TO NOW**: DO NOT USE TIME RELATIVE TO "NOW" (e.g., "3 days ago", "last week", "currently"). USE ABSOLUTE TIME (e.g., "on October 12, 2024") OR TIME RELATIVE TO AN EVENT DESCRIBED IN THE QUESTION (e.g., "two years before the project concluded").
+
+  **Example of a Multi-Hop CoKG and Various Question Styles**:
+  
+  **CoKG Structure**:
+  - **Target E0**: Name="Project Azorian", Category="Secret Operation", Description="A CIA mission to recover a sunken Soviet submarine at a cost about $800 million at that time ".
+  - **E1**: Name="Submarine", Category="Submarine"
+  - **E2**: Name="between 1966 and 1970", Category="Year"
+  - **E3**: Name="Ship", Category="Ship"
+  - **E4**: Name="A famous mid-20th century billionaire and aviator", Category="Person"
+  - **P0**: <|-E0-|> was designed to recover <|-E1-|>
+  - **P1**: <|-E1-|> disappeared in the year <|-E2-|>
+  - **P2**: <|-E0-|> utilized the specialized vessel <|-E3-|>
+  - **P3**: <|-E3-|> was publicly associated with the business empire of <|-E4-|>
+
+  **Correct Question Options (All use ALL predicates and entities, but NO clues from E0 description)**:
+  - "Identify the intelligence operation that employed a specialized deep-sea salvage ship—publicly linked to the business empire of a famous mid-20th-century billionaire aviator—to locate and recover a specific submarine that had mysteriously vanished between 1966 and 1970."
+  - "There was a naval project designed to retrieve a submarine that disappeared between 1966 and 1970. This project utilized a unique deep-sea recovery vessel commissioned by a legendary mid-20th-century billionaire aviator. According to historical records of this operation, what was the estimated cost of the mission at that time?"
+  - "Starting with the maritime history of the late 1960s, a submarine was lost between 1966 and 1970. A subsequent recovery operation utilized a specialized vessel associated with a famous mid-century business magnate known for his work in aviation. What specific name was given to this recovery operation?"
+  
+  For financial report, legal case, you should mostly ask about the content of the document not the title.
+  For scientific paper you should either ask (1) title of the paper (2) DOI or any identifier if any (3) exact numerical or information that has exact answer in the content of the paper.
+
+  If the relation is too complex, you can use symbolic representation like "Person A", "Person B", "Person C", etc.
+  Example:
+  - Person A is a scientist who works in a European research institution. He works with Person B who founded one of the first AI company in mid 2010s. Person B has a son who was born in the second week of the month, which become the student of Person A. Where did person B finish their undergraduate degree?
+  
+  **Location and Navigation Puzzles**: 
+  When asking about a location, prefer using topological or environmental clues rather than direct proximity.
+  Example:
+  - "I am at a station on a symmetric transit line; traveling 3 stops south leads to a transfer to another symmetric line. If I go 1 stop south instead and switch to a circular line, the 1st and 4th stations east have names with an edit distance of 1. If I then walk from a nearby major station past a driving school to a theater featuring a play about vision changes, what is the name of the restaurant I would see first when leaving?"
+
+  Output Format:
+  Provide the final question and the exact answer using the following format:
+  <question>Your multi-hop question here</question>
+  <answer>The exact name or fact that answers the question</answer>
+
+graph2query_user_prompt: |
+  Based on the following nested CoKG structure, generate a coherent question asking about E0. 
+  Remember to include every predicate and follow the fuzziness preference rule.
+  
+  Nested CoKG Structure:
+  {graph_text}
+  
+  Target Entity E0:
+  Name: {e0_name}
+  Description: {e0_description}
+  
+  Generate the question now.
+
+graph_evolver_system_prompt: |
+  You are an expert at refining and pruning Compositional Knowledge Graphs (CoKG) to make them extremely challenging for deep-search tasks.
+  
+  Your goal is to increase the difficulty and "depth" of the search required to solve the graph. You MUST evolve identifying information, leaving only the bare minimum necessary for a valid search path.
+  
+  Objectives:
+  1. **Prune Predicate (EXTREMELY CONSERVATIVE)**: Use `prune_predicate` to remove ONLY redundant or overly identifying predicates while strictly preserving the graph's connectivity.
+     - **BE EXTREMELY CONSERVATIVE**: Do not drop too many predicates. NEVER drop more than 10-20% of the whole predicates and NEVER drop any predicate linked to E0. Only remove predicates that contain excessively specific detail that cannot be effectively fuzzified.
+     - **CRITICAL**: For the target entity (E0), the remaining predicates MUST STILL uniquely identify the target entity when combined. Do NOT prune predicates if it leads to E0 being unsolvable or too ambiguous to distinguish from similar entities.
+  2. **Evolve Predicate**: Use `evolve_predicate` to strip away informational details while maintaining a path to the answer.
+     - **PREDICATE ID VERIFICATION**: Ensure you are evolving a predicate ID (e.g., P0, P1) and NOT an entity ID (e.g., E0, E1).
+     - **STRICT ENTITY TOKEN PERSISTENCE (MANDATORY)**: When evolving content, YOU MUST NOT REMOVE ANY existing entity token references (e.g., <|-Ei-|>) present in the original predicate. Every placeholder <|-E0-|>, <|-E1-|>, etc., that appeared in the original content MUST persist in the evolved content to maintain graph connectivity.
+     - **Numerical Precision**: Refrain from making specific numerical values (e.g., money, experiment results, or niche statistics) fuzzy if they are already obscure and difficult to search. Keeping these precise is often necessary to ensure the entity remains uniquely identifiable and solvable.
+     - **Aggressive Fuzziness for Downstream Hops**: Be **EXTREMELY AGGRESSIVE** at making predicates and constants for entities other than E0 (e.g., E1, E2, E3...) to be as fuzzy as possible. Remove most of the detail information, leave only 1-2 details that is essential (say one predicate one 1-2 key information)
+     - **Selective Fuzziness for E0**: For predicates directly describing E0, be less aggressive. They must be enough to uniquely describe the entity, even if paraphrased to be "noisy".
+  3. **Full-Graph Depth (AGRESSIVE)**: You MUST scrutinize information deep in the graph (E1, E2, E3...). If a downstream entity is too well-defined, the whole graph becomes too easy. Be **ruthless** in evolving downstream hops to maintain maximum ambiguity throughout the entire chain while ensuring the path to E0 is theoretically solvable.
+
+  Goal:
+  - Eliminate "One-Hop" search: Evolve content to remove identifying details of E0 directly, but NEVER remove entity tokens.
+  - Force Multi-Hop: Maintain the full graph structure (E0 -> E1 -> E2 ...) by keeping all entity links, while making each step ambiguous through paraphrasing.
+  - Minimum Detail, Maximum Connectivity: Only remove minor descriptive details. You MUST keep all existing entity tokens <|-Ei-|> within predicates to ensure the searcher can traverse the entire chain.
+  - Maintain Solvability: Ensure that despite the extreme fuzziness and conservative pruning, E0 is still theoretically solvable and uniquely identifiable through the remaining path.
+  - Conservative Pruning: Only prune a predicate if it is truly redundant or impossible to fuzzify. Prefer evolution over pruning.
+  - You can skip executing this pruning if you think the graph is already very difficult to solve without pruning especially when you concern about solvability!
+
+  Examples of how you should decide on the graph evolution:
+  - **evolve_predicate**:
+    evolve_predicate(predicate_id="P0", new_content="The relationship between <|-E0-|> and <|-E1-|> is now described in a more general, fuzzy way while keeping the tokens.")
+  - **prune_predicate**:
+    prune_predicate(predicate_id="P0")
+  - **finish**:
+    finish(reasoning="The graph is now extremely difficult to solve.")
+
+
+graph_evolver_tools:
+  - type: function
+    function:
+      name: evolve_predicate
+      description: "Modifies the content of a predicate to remove identifying details or make it more fuzzy. MUST use a predicate ID (P#) and MUST preserve ALL original entity tokens (<|-E#-|>) to maintain graph connectivity."
+      parameters:
+        type: object
+        properties:
+          predicate_id:
+            type: string
+            description: "The ID of the predicate to evolve (e.g., 'P0'). DO NOT use entity IDs like 'E1'."
+          new_content:
+            type: string
+            description: "The new, less detailed content for the predicate. Must maintain placeholders like <|-E1-|> if the entity is still involved."
+        required: ["predicate_id", "new_content"]
+  - type: function
+    function:
+      name: prune_predicate
+      description: "Removes a predicate and its entire downstream subtree from the graph."
+      parameters:
+        type: object
+        properties:
+          predicate_id:
+            type: string
+            description: "The ID of the predicate to prune (e.g., 'P1')."
+        required: ["predicate_id"]
+  - type: function
+    function:
+      name: finish
+      description: "Signals that the pruning process is complete."
+      parameters:
+        type: object
+        properties:
+          reasoning:
+            type: string
+            description: "A brief explanation of the pruning decisions made."
+        required: ["reasoning"]

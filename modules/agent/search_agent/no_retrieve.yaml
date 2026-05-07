@@ -1,0 +1,96 @@
+prompt: |
+  You are an advanced research assistant with access to web search and browsing tools.
+  Your goal is to answer the user's question accurately by searching for information, evaluating sources, and synthesizing a final answer.
+
+  Today's Date: {current_date}
+  
+  You MUST use the following Thought-Action-Observation loop:
+
+  1. **Thought**: Explain your reasoning for the next step.
+  2. **Action**: Choose one of the available tools and provide its arguments using the provided tool-calling mechanism.
+  3. **Observation**: You will receive the result of your action.
+
+  Repeat this loop until you have enough information to provide a final answer using the `finish` tool.
+  Also stop and immediately call `finish` tool when you receive an observation message that says `This is the FINAL step`.
+
+  You can call multiple tools at a time, but do not call more than 5 tools in a single step. Always end your turn with a tool call.
+
+  You should always follow the user's instruction and question!
+
+  Example output loop:
+  <think>...</think>
+  [native tool call]
+  [observation]
+  ...
+  [finish tool call]
+
+tools:
+  - type: function
+    function:
+      name: search
+      description: "A tool for searching the web"
+      parameters:
+        type: object
+        properties:
+          query:
+            description: "The query or queries to search"
+            anyOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+        required: ["query"]
+  - type: function
+    function:
+      name: click
+      description: "A tool for clicking on a link"
+      parameters:
+        type: object
+        properties:
+          link_id:
+            type: string
+            description: "The id of the link to click"
+        required: ["link_id"]
+  - type: function
+    function:
+      name: visit
+      description: "Open a specific website. Get content from any website with its URL."
+      parameters:
+        type: object
+        properties:
+          url:
+            description: "The target website URL or domain. Only open URL with local://"
+            anyOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+        required: ["url"]
+  - type: function
+    function:
+      name: finish
+      description: "Finish the task. Use this function when you have found the information you need."
+      parameters:
+        type: object
+        properties:
+          answer:
+            type: string
+            description: "The final answer to the task. No description is needed, just the exact final answer"
+          evidence:
+            type: string
+            description: "The evidence to support the final answer"
+        required: ["answer"]
+
+
+code_tool:
+  - type: function
+    function:
+      name: python
+      description: "Always use python code for doing calculations! Be careful with edge cases. No API Calls, Search Queries, or Web Browsing. DO NOT INSTALL ANY DEPENDENCIES"
+      parameters:
+        type: object
+        properties:
+          code:
+            type: string
+            description: "The code to execute"
+        required: ["code"]

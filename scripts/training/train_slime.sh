@@ -1,0 +1,203 @@
+#!/bin/bash
+
+# for rerun the task
+pkill -9 sglang
+sleep 3
+ray stop --force
+pkill -9 ray
+pkill -9 python
+sleep 3
+pkill -9 ray
+pkill -9 python
+
+set -ex
+
+# will prevent ray from buffering stdout/stderr
+export PYTHONBUFFERED=16
+export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5"
+
+WANDB_KEY="WANDB_KEY_HERE"
+
+NUM_GPUS=6
+
+NVLINK_COUNT=$(nvidia-smi topo -m 2>/dev/null | grep -o 'NV[0-9][0-9]*' | wc -l)
+if [ "$NVLINK_COUNT" -gt 0 ]; then
+    HAS_NVLINK=1
+else
+    HAS_NVLINK=0
+fi
+echo "HAS_NVLINK: $HAS_NVLINK (detected $NVLINK_COUNT NVLink references)"
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    DETECTED_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+else
+    DETECTED_GPUS=0
+fi
+NUM_GPUS=${NUM_GPUS:-${DETECTED_GPUS}}
+if [ -z "$NUM_GPUS" ] || [ "$NUM_GPUS" -le 0 ]; then
+    NUM_GPUS=8
+fi
+echo "NUM_GPUS: $NUM_GPUS"
+
+MAX_CONTEXT_LEN=64000
+MAX_GEN_LEN=64000
+MAX_EVAL_CONTEXT_LEN=128000
+MAX_EVAL_GEN_LEN=128000
+
+MODEL_ARGS_ROTARY_BASE=5000000
+MODEL_ARGS=(
+   --swiglu
+   --num-layers 36
+   --hidden-size 2560
+   --ffn-hidden-size 9728
+   --num-attention-heads 32
+   --group-query-attention
+   --num-query-groups 8
+   --use-rotary-position-embeddings
+   --disable-bias-linear
+   --normalization "RMSNorm"
+   --norm-epsilon 1e-6
+   --rotary-base "${MODEL_ARGS_ROTARY_BASE:-1000000}"
+   --vocab-size 151936
+   --kv-channels 128
+   --qk-layernorm
+)
+
+CKPT_ARGS=(
+   --hf-checkpoint /root/.cache/huggingface/hub/models--Qwen--Qwen3-4B-Thinking-2507/snapshots/768f209d9ea81521153ed38c47d515654e938aea
+   #--hf-checkpoint /root/Qwen3-4B-FP8
+   --ref-load /root/.cache/huggingface/megatron/EntiWeave-4B_torch_dist
+   --load /workspace/dr/main/webcomposer/training/output/slime/Qwen3-4B_slime/
+   --save /workspace/dr/main/webcomposer/training/output/slime/Qwen3-4B_slime/
+   --save-interval 20
+)
+
+ROLLOUT_ARGS=(
+  --custom-generate-function-path slime.rollout.tool_use_rollout.generate_with_tool
+  --prompt-data /workspace/dr/main/webcomposer/data/dataset/slime_rl_dataset.jsonl
+  --source-config-path configs/source_config.json
+  --input-key prompt
+  --label-key label
+  --tool-key tools
+  --rollout-batch-size 6
+  --n-samples-per-prompt 8
+  --global-batch-size 24
+
+  --num-rollout 4
+  --rollout-max-context-len ${MAX_CONTEXT_LEN}
+  --rollout-max-response-len ${MAX_GEN_LEN}
+  --rollout-shuffle
+  --rollout-temperature 1.0
+  --rollout-top-p 0.95
+  --rollout-top-k 40
+  --micro-batch-size 1
+  --use-dynamic-batch-size
+  --max-tokens-per-gpu 8192
+  --sglang-server-concurrency 128
+  --remote-tool-url http://host.docker.internal:8002
+  --rm-type remote_rm
+  --rm-url http://host.docker.internal:8003/reward
+  --tool-max-retry 5
+  --tool-timeout 120
+)
+
+EVAL_ARGS=(
+   --skip-eval-before-train
+   --eval-interval 20
+   --eval-prompt-data /workspace/dr/main/webcomposer/data/eval/slime_rl_eval_dataset.jsonl
+   --n-samples-per-eval-prompt 1
+   --eval-max-context-len ${MAX_EVAL_CONTEXT_LEN}
+   --eval-max-response-len ${MAX_EVAL_GEN_LEN}
+   --eval-temperature 1.0
+   --eval-top-p 0.95
+   --eval-top-k 40
+)
+
+PERF_ARGS=(
+   --tensor-model-parallel-size 4
+   --sequence-parallel
+   --pipeline-model-parallel-size 1
+   --context-parallel-size 1
+   --expert-model-parallel-size 1
+   --expert-tensor-parallel-size 1
+
+   --recompute-granularity full
+   --recompute-method uniform
+   --recompute-num-layers 1
+
+   # --micro-batch-size 1
+   --use-dynamic-batch-size
+   --max-tokens-per-gpu 9216
+)
+
+GRPO_ARGS=(
+   --advantage-estimator grpo
+   --use-kl-loss
+   --kl-loss-coef 0.00
+   --kl-loss-type low_var_kl
+   --entropy-coef 0.00
+   --eps-clip 0.2
+   --eps-clip-high 0.28
+)
+
+OPTIMIZER_ARGS=(
+   --optimizer adam
+   --lr 1e-6
+   --lr-decay-style constant
+   --weight-decay 0.1
+   --adam-beta1 0.9
+   --adam-beta2 0.98
+)
+
+WANDB_ARGS=(
+   --use-wandb
+   --wandb-project slime-dev
+   --wandb-group qwen3-4B-test
+   --wandb-key ${WANDB_KEY}
+)
+
+SGLANG_ARGS=(
+   --rollout-num-gpus-per-engine 2
+   --sglang-mem-fraction-static 0.7
+)
+
+MISC_ARGS=(
+   # default dropout in megatron is 0.1
+   --attention-dropout 0.0
+   --hidden-dropout 0.0
+   # should be good for model performance
+   --accumulate-allreduce-grads-in-fp32
+   --attention-softmax-in-fp32
+   # need to comment this when using model with MLA
+   --attention-backend flash
+)
+
+# launch the master node of ray in container
+export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
+ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} --disable-usage-stats --dashboard-host=0.0.0.0 --dashboard-port=8265
+
+# Build the runtime environment JSON with proper variable substitution
+RUNTIME_ENV_JSON="{
+  \"env_vars\": {
+    \"PYTHONPATH\": \"/root/Megatron-LM/\",
+    \"CUDA_DEVICE_MAX_CONNECTIONS\": \"1\",
+    \"NCCL_NVLS_ENABLE\": \"${HAS_NVLINK}\"
+  }
+}"
+
+ray job submit --address="http://127.0.0.1:8265" \
+   --runtime-env-json="${RUNTIME_ENV_JSON}" \
+   -- python3 train.py \
+   --actor-num-nodes 1 \
+   --actor-num-gpus-per-node ${NUM_GPUS} \
+   --colocate \
+   ${MODEL_ARGS[@]} \
+   ${CKPT_ARGS[@]} \
+   ${ROLLOUT_ARGS[@]} \
+   ${OPTIMIZER_ARGS[@]} \
+   ${GRPO_ARGS[@]} \
+   ${WANDB_ARGS[@]} \
+   ${PERF_ARGS[@]} \
+   ${EVAL_ARGS[@]} \
+   ${SGLANG_ARGS[@]} \
+   ${MISC_ARGS[@]}

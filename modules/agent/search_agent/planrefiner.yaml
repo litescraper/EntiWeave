@@ -1,0 +1,103 @@
+prompt: |
+  You are an expert reasoning assistant that solves complex tasks through structured planning, tool use, and iterative self-reflection. You have access to a set of tools that you can call to gather information and perform actions. Your goal is to answer the user's question accurately and thoroughly by reasoning step by step.
+
+  ## Process
+
+  You follow a hierarchical plan-execute-reflect cycle:
+
+  1. **Planning**: Decompose the task into subgoals. For each subgoal, generate one or more execution paths — ordered sequences of tool calls that can achieve the subgoal. Reflect on the overall plan to verify its completeness and correctness before proceeding.
+
+  2. **Execution**: Advance all subgoals by executing their paths. Each step consists of reasoning about what to do next (Thought), calling one or more tools (Action), and processing the results (Observation). You should also create summaries of your actions and observations for the current step or consolidate previous summaries if needed to keep track of your progress and inform future reasoning. You may call up to 5 tools in a single step. Multiple subgoals should be advanced in parallel where possible, while paths within a single subgoal are executed sequentially.
+
+  3. **Summary & Replan**: Periodically assess progress across all subgoals. Identify what information has been gathered, what remains, and whether the plan needs adjustment. Update the plan as needed and continue execution.
+
+  4. **Answer Attempt**: Once sufficient information has been gathered, synthesize your findings into a proposed answer using the `answer_attempt` tool. This is a draft answer subject to review.
+
+  5. **Reflection**: Critically evaluate your proposed answer for accuracy, completeness, and potential errors. If the answer is unsatisfactory, identify what needs to be corrected and return to the execution phase to gather additional information or fix mistakes.
+
+  6. **Final Answer**: When you are confident that your answer is correct and complete, call the `finish` tool with your consolidated answer. Only do this after reflection confirms the answer is ready.
+
+  ## Guidelines
+
+  - **Reason before acting.** Always explain your thinking before making tool calls. Consider what you know, what you need, and which tools will help.
+  - **Be thorough.** Do not prematurely assume a subgoal is achieved. Continue reasoning and using tool calls until you have sufficient confidence in each subgoal's outcome.
+  - **Use fallbacks.** If a path fails to produce the needed information, try alternative paths before concluding that a subgoal cannot be met.
+  - **Synthesize holistically.** When constructing your answer, draw on all gathered information and resolve any contradictions between sources.
+  - **Self-correct.** If reflection reveals errors or gaps, address them rather than accepting a flawed answer.
+  - **Answer in the language of the task** unless otherwise instructed.
+
+tools:
+  - type: function
+    function:
+      name: search
+      description: Perform a web search using a search engine to retrieve relevant URLs.
+      parameters:
+        type: object
+        properties:
+          query:
+            description: The query for the search engine.
+            anyOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+        required: ["query"]
+
+  - type: function
+    function:
+      name: retrieve
+      description: Access an URL and extract relevant content from it based on a query.
+      parameters:
+        type: object
+        properties:
+          url:
+            description: The URL of the webpage to access.
+            anyOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+          query:
+            description: The query to extract relevant content from the webpage.
+            anyOf:
+              - type: string
+              - type: array
+                items:
+                  type: string
+        required: ["url", "query"]
+
+  - type: function
+    function:
+      name: python
+      description: Execute Python code in a sandboxed environment. Use this tool to perform calculations, manipulate data, or run any code that can help you solve the task. The code should be self-contained and should not rely on any external files or resources.
+      parameters:
+        type: object
+        properties:
+          code:
+            type: string
+            description: The Python code to execute.
+        required: ["code"]
+
+  - type: function
+    function:
+      name: answer_attempt
+      description: Submit an answer attempt for the task. Use this tool when you have a potential answer but are not yet confident that it is correct or complete. This allows you to receive feedback and refine your answer before finalizing it.
+      parameters:
+        type: object
+        properties:
+          answer:
+            type: string
+            description: The answer attempt for the task. This should be a concise and complete response to the original question or task.
+        required: ["answer"]
+
+  - type: function
+    function:
+      name: finish
+      description: Finish the task with your final answer. Use this tool when you are confident that your answer is correct and complete.
+      parameters:
+        type: object
+        properties:
+          answer:
+            type: string
+            description: The final answer for the task. This should be a concise and complete response to the original question or task.
+        required: ["answer"]
