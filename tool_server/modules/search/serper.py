@@ -13,7 +13,7 @@ class SerperSearcher:
         Initialize the Serper searcher.
         """
         self.api_key = os.getenv("SERPER_API_KEY")
-        self.base_url = "https://google.serper.dev/search"
+        self.base_url = f'{os.getenv("SERPER_BASE_URL", "https://google.serper.dev").rstrip("/")}/search'
         self.max_results = max_results
         self.timeout = timeout
 
